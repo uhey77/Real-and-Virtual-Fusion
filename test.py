@@ -35,6 +35,7 @@ character_image = None
 has_character = False
 character_parts = {}  # 体のパーツごとの画像を格納する辞書
 
+
 # 背景画像の設定
 def set_country_background(country_name):
     """指定した国の背景画像を読み込む関数"""
@@ -59,6 +60,7 @@ def set_country_background(country_name):
                     cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 2)
         return default_bg
 
+
 # アニメキャラクター画像を読み込む関数
 def load_character_image(character_name):
     """指定したキャラクター画像を読み込む関数"""
@@ -73,7 +75,7 @@ def load_character_image(character_name):
 
     if os.path.exists(char_path):
         img = cv2.imread(char_path, cv2.IMREAD_UNCHANGED)  # アルファチャンネルも読み込む
-        
+
         # アルファチャンネルがある場合
         if img.shape[2] == 4:
             # アルファチャンネルを分離
@@ -90,12 +92,13 @@ def load_character_image(character_name):
         print(f"キャラクター画像 {char_path} が見つかりません。")
         return None, None, False
 
+
 # キャラクターパーツを読み込む関数
 def load_character_parts():
     """キャラクターの体のパーツごとの画像を読み込む関数"""
     parts = {}
     parts_folder = "character_parts"
-    
+
     # フォルダがない場合は作成
     if not os.path.exists(parts_folder):
         os.makedirs(parts_folder)
@@ -105,12 +108,12 @@ def load_character_parts():
 
     # 各パーツの画像を読み込む
     part_names = ["head", "body", "right_arm", "left_arm", "right_leg", "left_leg"]
-    
+
     for part in part_names:
-        part_path = f"{parts_folder}/{part}.png"
+        part_path = f"{parts_folder}/{character_name}{part}.png"
         if os.path.exists(part_path):
             img = cv2.imread(part_path, cv2.IMREAD_UNCHANGED)  # アルファチャンネルも読み込む
-            
+
             # アルファチャンネルがある場合
             if img.shape[2] == 4:
                 # アルファチャンネルを分離
@@ -123,13 +126,14 @@ def load_character_parts():
                 parts[part] = {"image": rgb, "mask": mask}
             else:
                 parts[part] = {"image": img, "mask": None}
-            
+
             print(f"{part} 画像を読み込みました。")
-    
+
     if not parts:
         print("パーツ画像が見つかりませんでした。")
-    
+
     return parts
+
 
 # 背景画像と人物を合成する関数
 def compose_background(frame, background, results):
@@ -154,30 +158,32 @@ def compose_background(frame, background, results):
         print("セグメンテーションマスクが取得できませんでした。")
         return frame
 
+
 # マウスコールバック関数（描画モード用）
 def draw_on_canvas(event, x, y, flags, param):
     global is_drawing, last_point, canvas, current_drawing
-    
+
     if drawing_mode:
         if event == cv2.EVENT_LBUTTONDOWN:
             # 描画開始
             is_drawing = True
             last_point = (x, y)
             current_drawing = [(x, y)]  # 新しい描画パスを開始
-        
+
         elif event == cv2.EVENT_MOUSEMOVE and is_drawing:
             # 描画中
             if last_point is not None:
                 cv2.line(canvas, last_point, (x, y), drawing_color, drawing_thickness)
                 last_point = (x, y)
                 current_drawing.append((x, y))  # 現在の描画パスに点を追加
-        
+
         elif event == cv2.EVENT_LBUTTONUP:
             # 描画終了
             is_drawing = False
             if len(current_drawing) > 1:
                 drawings.append(current_drawing.copy())  # 完成した描画パスを保存
                 current_drawing = []
+
 
 # 骨格の関節点を取得する関数
 def get_joint_position(results, joint_type):
@@ -223,17 +229,18 @@ def get_joint_position(results, joint_type):
             return (int(landmark.x * frame_width), int(landmark.y * frame_height))
     return None
 
+
 # キャラクターを描画する関数
 def draw_character(image, results):
     global character_parts
-    
+
     # パーツがない場合は処理しない
     if not character_parts:
         return image
-    
+
     # 合成用の空の画像
     character_layer = np.zeros_like(image)
-    
+
     # 頭部の位置を取得
     head_pos = get_joint_position(results, "nose")
     if head_pos and "head" in character_parts:
@@ -259,28 +266,28 @@ def draw_character(image, results):
                 character_layer[y1:y2, x1:x2] = roi * (1 - mask_roi) + img_roi * mask_roi
             else:
                 character_layer[y1:y2, x1:x2] = head["image"][:h_actual, :w_actual]
-    
+
     # 体の位置を取得（左右の肩の中間）
     left_shoulder = get_joint_position(results, "left_shoulder")
     right_shoulder = get_joint_position(results, "right_shoulder")
-    
+
     if left_shoulder and right_shoulder and "body" in character_parts:
         body_x = (left_shoulder[0] + right_shoulder[0]) // 2
         body_y = (left_shoulder[1] + right_shoulder[1]) // 2
-        
+
         body = character_parts["body"]
         h, w = body["image"].shape[:2]
-        
+
         # 体の画像を配置する座標を計算
         x1 = max(0, body_x - w // 2)
         y1 = max(0, body_y - h // 4)  # 体の上部を肩の位置に合わせる
         x2 = min(image.shape[1], x1 + w)
         y2 = min(image.shape[0], y1 + h)
-        
+
         # 画像サイズが画面からはみ出る場合は調整
         w_actual = x2 - x1
         h_actual = y2 - y1
-        
+
         if w_actual > 0 and h_actual > 0:
             # マスクがある場合はマスクを使用して合成
             if body["mask"] is not None:
@@ -290,44 +297,44 @@ def draw_character(image, results):
                 character_layer[y1:y2, x1:x2] = roi * (1 - mask_roi) + img_roi * mask_roi
             else:
                 character_layer[y1:y2, x1:x2] = body["image"][:h_actual, :w_actual]
-    
+
     # 右腕の位置と角度を計算
     right_shoulder = get_joint_position(results, "right_shoulder")
     right_elbow = get_joint_position(results, "right_elbow")
     right_wrist = get_joint_position(results, "right_wrist")
-    
+
     if right_shoulder and right_elbow and right_wrist and "right_arm" in character_parts:
         # 腕のパーツを取得
         right_arm = character_parts["right_arm"]
-        
+
         # 肩から肘、肘から手首への角度を計算
-        shoulder_to_elbow_angle = np.degrees(np.arctan2(right_elbow[1] - right_shoulder[1], 
+        shoulder_to_elbow_angle = np.degrees(np.arctan2(right_elbow[1] - right_shoulder[1],
                                                         right_elbow[0] - right_shoulder[0]))
-        
+
         # 腕の画像を回転
         h, w = right_arm["image"].shape[:2]
         center = (w // 2, h // 4)  # 腕の上部（肩側）を回転の中心に
-        
+
         # 回転行列を作成
         M = cv2.getRotationMatrix2D(center, shoulder_to_elbow_angle, 1.0)
-        
+
         # 画像を回転
         rotated_arm = cv2.warpAffine(right_arm["image"], M, (w, h))
         if right_arm["mask"] is not None:
             rotated_mask = cv2.warpAffine(right_arm["mask"], M, (w, h))
         else:
             rotated_mask = None
-        
+
         # 腕を肩の位置に配置
         x1 = max(0, right_shoulder[0] - center[0])
         y1 = max(0, right_shoulder[1] - center[1])
         x2 = min(image.shape[1], x1 + w)
         y2 = min(image.shape[0], y1 + h)
-        
+
         # 画像サイズが画面からはみ出る場合は調整
         w_actual = x2 - x1
         h_actual = y2 - y1
-        
+
         if w_actual > 0 and h_actual > 0:
             # マスクがある場合はマスクを使用して合成
             if rotated_mask is not None:
@@ -337,44 +344,42 @@ def draw_character(image, results):
                 character_layer[y1:y2, x1:x2] = roi * (1 - mask_roi) + img_roi * mask_roi
             else:
                 character_layer[y1:y2, x1:x2] = rotated_arm[:h_actual, :w_actual]
-    
+
     # 左腕の位置と角度を計算
     left_shoulder = get_joint_position(results, "left_shoulder")
     left_elbow = get_joint_position(results, "left_elbow")
     left_wrist = get_joint_position(results, "left_wrist")
-    
+
     if left_shoulder and left_elbow and left_wrist and "left_arm" in character_parts:
         # 腕のパーツを取得
         left_arm = character_parts["left_arm"]
-        
+
         # 肩から肘、肘から手首への角度を計算
-        shoulder_to_elbow_angle = np.degrees(np.arctan2(left_elbow[1] - left_shoulder[1], 
-                                                       left_elbow[0] - left_shoulder[0]))
-        
+        shoulder_to_elbow_angle = np.degrees(np.arctan2(left_elbow[1] - left_shoulder[1], left_elbow[0] - left_shoulder[0]))
+
         # 腕の画像を回転
         h, w = left_arm["image"].shape[:2]
         center = (w // 2, h // 4)  # 腕の上部（肩側）を回転の中心に
-        
+
         # 回転行列を作成
         M = cv2.getRotationMatrix2D(center, shoulder_to_elbow_angle, 1.0)
-        
+
         # 画像を回転
         rotated_arm = cv2.warpAffine(left_arm["image"], M, (w, h))
         if left_arm["mask"] is not None:
             rotated_mask = cv2.warpAffine(left_arm["mask"], M, (w, h))
         else:
             rotated_mask = None
-        
+
         # 腕を肩の位置に配置
         x1 = max(0, left_shoulder[0] - center[0])
         y1 = max(0, left_shoulder[1] - center[1])
         x2 = min(image.shape[1], x1 + w)
         y2 = min(image.shape[0], y1 + h)
-        
+
         # 画像サイズが画面からはみ出る場合は調整
         w_actual = x2 - x1
         h_actual = y2 - y1
-        
         if w_actual > 0 and h_actual > 0:
             # マスクがある場合はマスクを使用して合成
             if rotated_mask is not None:

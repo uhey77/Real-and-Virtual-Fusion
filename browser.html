@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>自分が描いた2Dキャラを姿勢検出で動かす</title>
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden; 
+      font-family: sans-serif;
+      background: #111;
+      color: white;
+    }
+    
+    .container {
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    #character-container {
+      position: relative;
+      width: 100%;
+      height: 80vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    #character-svg {
+      position: absolute;
+      height: 80%;
+      z-index: 5;
+    }
+    
+    #video-debug {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      width: 160px;
+      height: 120px;
+      border: 2px solid white;
+      z-index: 10;
+    }
+    
+    #cam {
+      display: none;
+    }
+    
+    #status {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px;
+      border-radius: 5px;
+      z-index: 10;
+      max-width: 300px;
+    }
+    
+    #controls {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    
+    button {
+      padding: 10px 20px;
+      background: #4285F4;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    
+    button:hover {
+      background: #3367D6;
+    }
+    
+    .hidden {
+      display: none;
+    }
+    
+    #file-upload {
+      display: none;
+    }
+    
+    #upload-label {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #F44336;
+      color: white;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    
+    #upload-label:hover {
+      background: #D32F2F;
+    }
+    
+    #start-screen {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    
+    #start-screen h1 {
+      font-size: 28px;
+      margin-bottom: 20px;
+    }
+    
+    #start-screen p {
+      font-size: 16px;
+      margin-bottom: 30px;
+      max-width: 600px;
+    }
+    
+    .button-group {
+      display: flex;
+      gap: 15px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div id="start-screen">
+      <h1>2Dキャラをリアルタイムで動かそう！</h1>
+      <p>あなたが描いたキャラクターを、カメラで撮影した姿勢に合わせてリアルタイムで動かします。
+         2つの方法から選べます：</p>
+      <div class="button-group">
+        <button id="use-default">サンプルキャラクターを使う</button>
+        <input type="file" id="file-upload" accept=".svg">
+        <label for="file-upload" id="upload-label">自分のSVGをアップロード</label>
+      </div>
+      <p style="margin-top: 20px; color: #aaa;">※自分のSVGを使う場合は、Pose Animator形式のテンプレートに沿って作成してください</p>
+    </div>
+    
+    <div id="character-container">
+      <object id="character-svg" type="image/svg+xml" data=""></object>
+      <video id="video-debug" autoplay muted playsinline></video>
+      <video id="cam" autoplay muted playsinline></video>
+    </div>
+    
+    <div id="status">ステータス: 初期化中...</div>
+    
+    <div id="controls">
+      <button id="restart-btn">カメラを再起動</button>
+      <button id="toggle-debug">デバッグ表示 ON/OFF</button>
+      <button id="toggle-character">キャラクター表示 ON/OFF</button>
+      <button id="upload-btn">別のSVGをアップロード</button>
+    </div>
+  </div>
+
+  <script type="module">
+    // MediaPipe Tasks Vision のインポート
+    import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+    
+    // DOM要素の取得
+    const statusEl = document.getElementById('status');
+    const videoDebug = document.getElementById('video-debug');
+    const cam = document.getElementById('cam');
+    const characterSvg = document.getElementById('character-svg');
+    const restartBtn = document.getElementById('restart-btn');
+    const toggleDebugBtn = document.getElementById('toggle-debug');
+    const toggleCharacterBtn = document.getElementById('toggle-character');
+    const uploadBtn = document.getElementById('upload-btn');
+    const fileUpload = document.getElementById('file-upload');
+    const startScreen = document.getElementById('start-screen');
+    const useDefaultBtn = document.getElementById('use-default');
+    const uploadLabel = document.getElementById('upload-label');
+    
+    // グローバル変数
+    let poseLandmarker = null;
+    let camera = null;
+    let lastVideoTime = 0;
+    let animationRunning = false;
+    let isDebugVisible = true;
+    let isCharacterVisible = true;
+    let svgDocument = null;
+    let skeleton = null;
+    
+    // SVG内の関節点要素
+    const jointMap = {
+      nose: null,
+      leftEye: null,
+      rightEye: null,
+      leftEar: null,
+      rightEar: null,
+      leftShoulder: null,
+      rightShoulder: null,
+      leftElbow: null,
+      rightElbow: null,
+      leftWrist: null,
+      rightWrist: null,
+      leftHip: null,
+      rightHip: null,
+      leftKnee: null,
+      rightKnee: null,
+      leftAnkle: null,
+      rightAnkle: null
+    };
+    
+    // スケルトン構造（関節間の接続）
+    const connections = [
+      ['leftShoulder', 'leftElbow'],
+      ['leftElbow', 'leftWrist'],
+      ['rightShoulder', 'rightElbow'],
+      ['rightElbow', 'rightWrist'],
+      ['leftShoulder', 'leftHip'],
+      ['rightShoulder', 'rightHip'],
+      ['leftHip', 'leftKnee'],
+      ['leftKnee', 'leftAnkle'],
+      ['rightHip', 'rightKnee'],
+      ['rightKnee', 'rightAnkle'],
+      ['leftShoulder', 'rightShoulder'],
+      ['leftHip', 'rightHip']
+    ];
+    
+    // MediaPipeのランドマークとSVGの関節点名のマッピング
+    const landmarkToJoint = {
+      0: 'nose',
+      2: 'leftEye',
+      5: 'rightEye',
+      7: 'leftEar',
+      8: 'rightEar',
+      11: 'leftShoulder',
+      12: 'rightShoulder',
+      13: 'leftElbow',
+      14: 'rightElbow',
+      15: 'leftWrist',
+      16: 'rightWrist',
+      23: 'leftHip',
+      24: 'rightHip',
+      25: 'leftKnee',
+      26: 'rightKnee',
+      27: 'leftAnkle',
+      28: 'rightAnkle'
+    };
+    
+    // ステータス表示を更新
+    function updateStatus(msg, isError = false) {
+      statusEl.textContent = `ステータス: ${msg}`;
+      statusEl.style.backgroundColor = isError ? 'rgba(220, 0, 0, 0.7)' : 'rgba(0, 0, 0, 0.7)';
+      console.log(`[STATUS] ${msg}`);
+    }
+    
+    // エラー表示
+    function showError(msg, error) {
+      updateStatus(msg, true);
+      console.error(msg, error);
+    }
+    
+    // カメラへのアクセス設定
+    async function setupCamera() {
+      updateStatus('カメラへのアクセスを要求中...');
+      
+      try {
+        // 既存のストリームがあれば停止
+        if (cam.srcObject) {
+          cam.srcObject.getTracks().forEach(track => track.stop());
+        }
+        
+        // カメラへのアクセス要求
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }
+        });
+        
+        // ビデオにストリームを設定
+        cam.srcObject = stream;
+        videoDebug.srcObject = stream;
+        
+        // ビデオのロード完了を待機
+        return new Promise((resolve) => {
+          cam.onloadeddata = () => {
+            updateStatus('カメラの接続に成功しました');
+            resolve(cam);
+          };
+        });
+      } catch (error) {
+        showError(`カメラへのアクセスに失敗しました: ${error.message}`, error);
+        throw error;
+      }
+    }
+    
+    // MediaPipe PoseLandmarkerの初期化
+    async function setupPoseLandmarker() {
+      updateStatus('姿勢検出モデルを読み込み中...');
+      
+      try {
+        // FilesetResolverを使用してWASMファイルをロード
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+        );
+        
+        // PoseLandmarkerを作成
+        poseLandmarker = await PoseLandmarker.createFromOptions(
+          vision,
+          {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numPoses: 1
+          }
+        );
+        
+        updateStatus('姿勢検出モデルの読み込みが完了しました');
+        return poseLandmarker;
+      } catch (error) {
+        showError(`姿勢検出モデルの初期化に失敗しました: ${error.message}`, error);
+        throw error;
+      }
+    }
+    
+    // SVGドキュメントを読み込み、関節点要素を取得
+    function initializeSkeleton() {
+      try {
+        // SVGドキュメントの取得
+        svgDocument = characterSvg.contentDocument;
+        if (!svgDocument) {
+          throw new Error("SVGドキュメントが読み込めません");
+        }
+        
+        // 関節点要素の取得
+        for (const joint in jointMap) {
+          const element = svgDocument.getElementById(joint);
+          if (element) {
+            jointMap[joint] = element;
+          } else {
+            console.warn(`関節点 ${joint} が見つかりません`);
+          }
+        }
+        
+        updateStatus('SVGキャラクターの初期化が完了しました');
+        return true;
+      } catch (error) {
+        showError(`SVGキャラクターの初期化に失敗しました: ${error.message}`, error);
+        return false;
+      }
+    }
+    
+    // SVGの関節点を更新（ランドマークに基づいて）
+    function updateSkeleton(landmarks) {
+      if (!svgDocument || !landmarks || landmarks.length === 0) return;
+      
+      try {
+        // 各ランドマークに対応する関節点を更新
+        for (const [index, joint] of Object.entries(landmarkToJoint)) {
+          const landmark = landmarks[parseInt(index)];
+          const element = jointMap[joint];
+          
+          if (landmark && element) {
+            // SVGのビューボックスに合わせて座標を変換
+            const svgViewBox = svgDocument.documentElement.viewBox.baseVal;
+            const x = landmark.x * svgViewBox.width;
+            const y = landmark.y * svgViewBox.height;
+            
+            // transform属性を更新
+            element.setAttribute('transform', `translate(${x}, ${y})`);
+          }
+        }
+      } catch (error) {
+        console.warn('スケルトン更新エラー:', error);
+      }
+    }
+    
+    // デバッグ表示の切り替え
+    function toggleDebugView() {
+      isDebugVisible = !isDebugVisible;
+      videoDebug.style.display = isDebugVisible ? 'block' : 'none';
+      updateStatus(`デバッグ表示を${isDebugVisible ? 'オン' : 'オフ'}にしました`);
+    }
+    
+    // キャラクター表示の切り替え
+    function toggleCharacterView() {
+      isCharacterVisible = !isCharacterVisible;
+      characterSvg.style.display = isCharacterVisible ? 'block' : 'none';
+      updateStatus(`キャラクター表示を${isCharacterVisible ? 'オン' : 'オフ'}にしました`);
+    }
+    
+    // 検出と更新のメインループ
+    function startDetectionLoop() {
+      if (animationRunning) return;
+      
+      animationRunning = true;
+      updateStatus('姿勢検出を開始します...');
+      
+      // 検出ループ関数
+      const detectionFrame = async (timestamp) => {
+        if (!animationRunning) return;
+        
+        try {
+          // ビデオフレームを処理（時間が変化した場合のみ）
+          if (cam.readyState >= 2) {  // HAVE_CURRENT_DATA
+            if (timestamp !== lastVideoTime) {
+              lastVideoTime = timestamp;
+              
+              // ポーズを検出
+              const results = poseLandmarker.detectForVideo(cam, timestamp);
+              
+              // ランドマークがあればスケルトンを更新
+              if (results.landmarks && results.landmarks.length > 0) {
+                updateSkeleton(results.landmarks[0]);
+                updateStatus('姿勢を検出中');
+              } else {
+                updateStatus('姿勢を検出できません - カメラに体を映してください');
+              }
+            }
+          }
+        } catch (error) {
+          console.warn('検出エラー:', error);
+        }
+        
+        // 次のフレームをリクエスト
+        requestAnimationFrame(detectionFrame);
+      };
+      
+      // 検出ループを開始
+      requestAnimationFrame(detectionFrame);
+    }
+    
+    // SVGファイルをアップロードした時の処理
+    function handleFileUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      if (file.type !== 'image/svg+xml') {
+        showError('SVGファイルを選択してください', null);
+        return;
+      }
+      
+      updateStatus('SVGファイルを読み込み中...');
+      
+      // FileReaderでファイルを読み込み
+      const reader = new FileReader();
+      reader.onload = () => {
+        // ObjectタグのdataにBlobURLを設定
+        const blobUrl = URL.createObjectURL(file);
+        characterSvg.data = blobUrl;
+        
+        // SVGロード完了後にスケルトンを初期化
+        characterSvg.onload = () => {
+          setTimeout(() => {
+            if (initializeSkeleton()) {
+              startScreen.classList.add('hidden');
+              updateStatus('カスタムSVGの読み込みが完了しました');
+            } else {
+              showError('SVGファイルの形式が正しくありません。Pose Animator形式のテンプレートを使用してください。', null);
+            }
+          }, 500); // SVGの読み込み完了を待つため少し遅延
+        };
+      };
+      
+      reader.onerror = () => {
+        showError('ファイルの読み込みに失敗しました', reader.error);
+      };
+      
+      reader.readAsArrayBuffer(file);
+    }
+    
+    // デフォルトのSVGキャラクターを使用
+    function useDefaultCharacter() {
+      updateStatus('デフォルトキャラクターを読み込み中...');
+      
+      // デフォルトのSVGパス（Pose Animator形式）
+      const defaultSvgUrl = 'https://yemount.github.io/pose-animator/resources/illustration/robot.svg';
+      characterSvg.data = defaultSvgUrl;
+      
+      // SVGロード完了後にスケルトンを初期化
+      characterSvg.onload = () => {
+        setTimeout(() => {
+          if (initializeSkeleton()) {
+            startScreen.classList.add('hidden');
+            updateStatus('デフォルトキャラクターの読み込みが完了しました');
+          } else {
+            showError('デフォルトSVGの読み込みに失敗しました', null);
+          }
+        }, 500); // SVGの読み込み完了を待つため少し遅延
+      };
+    }
+    
+    // カメラを再起動
+    async function restartCamera() {
+      updateStatus('カメラを再起動中...');
+      
+      try {
+        await setupCamera();
+        updateStatus('カメラを再起動しました');
+      } catch (error) {
+        showError(`カメラの再起動に失敗しました: ${error.message}`, error);
+      }
+    }
+    
+    // イベントリスナーの設定
+    restartBtn.addEventListener('click', restartCamera);
+    toggleDebugBtn.addEventListener('click', toggleDebugView);
+    toggleCharacterBtn.addEventListener('click', toggleCharacterView);
+    uploadBtn.addEventListener('click', () => fileUpload.click());
+    fileUpload.addEventListener('change', handleFileUpload);
+    useDefaultBtn.addEventListener('click', useDefaultCharacter);
+    
+    // アプリケーション初期化
+    async function initializeApp() {
+      try {
+        // カメラのセットアップ
+        await setupCamera();
+        
+        // MediaPipe PoseLandmarkerの初期化
+        await setupPoseLandmarker();
+        
+        // 検出ループを開始
+        startDetectionLoop();
+        
+        updateStatus('準備完了！SVGキャラクターを選択してください');
+      } catch (error) {
+        showError(`初期化に失敗しました: ${error.message}`, error);
+      }
+    }
+    
+    // アプリケーション起動
+    window.onload = initializeApp;
+  </script>
+</body>
+</html>
