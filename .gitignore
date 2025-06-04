@@ -1,1 +1,10 @@
 get-pip.py
+
+.venv
+
+.vscode/
+
+.mypy_cache/
+.mypy/
+__pycache__/
+*.py[cod]
