@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>超安定版 姿勢検出アニメーション</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #111;
+      color: white;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+    .container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #canvas {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #video {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 160px;
+      height: 120px;
+      border: 2px solid white;
+      border-radius: 4px;
+    }
+    #status {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px;
+      border-radius: 5px;
+      z-index: 10;
+    }
+    .controls {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      z-index: 10;
+      justify-content: center;
+      max-width: 600px;
+    }
+    button {
+      padding: 10px 20px;
+      background: #4285F4;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover {
+      background: #2a75f3;
+    }
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 15px;
+      border-radius: 5px;
+      margin-top: 10px;
+      width: 100%;
+    }
+    .slider-container label {
+      min-width: 150px;
+    }
+    .slider-container input {
+      flex: 1;
+    }
+    .slider-value {
+      min-width: 40px;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <canvas id="canvas"></canvas>
+    <video id="video" autoplay playsinline></video>
+    <div id="status">ステータス: 初期化中...</div>
+    <div class="controls">
+      <button id="toggle-video">カメラ ON/OFF</button>
+      <button id="toggle-character">キャラクター ON/OFF</button>
+      <button id="toggle-color">カラー変更</button>
+      <button id="reset-position">位置をリセット</button>
+      <div class="slider-container">
+        <label for="stability">安定度:</label>
+        <input type="range" id="stability" min="0.7" max="0.99" step="0.01" value="0.95">
+        <span id="stability-value" class="slider-value">0.95</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    // 要素の取得
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const toggleVideoBtn = document.getElementById('toggle-video');
+    const toggleCharacterBtn = document.getElementById('toggle-character');
+    const toggleColorBtn = document.getElementById('toggle-color');
+    const resetPositionBtn = document.getElementById('reset-position');
+    const stabilitySlider = document.getElementById('stability');
+    const stabilityValue = document.getElementById('stability-value');
+
+    // グローバル変数
+    let poseLandmarker = null;
+    let isVideoVisible = true;
+    let isCharacterVisible = true;
+    let animationRunning = false;
+    let lastVideoTime = 0;
+    let stabilityFactor = 0.95; // 安定度
+    let characterColors = {
+      head: '#FFFFCC',
+      body: '#FFAAAA',
+      arms: '#DDDDFF',
+      legs: '#AAAAFF'
+    };
+    
+    const colorSchemes = [
+      { head: '#FFFFCC', body: '#FFAAAA', arms: '#DDDDFF', legs: '#AAAAFF' }, // デフォルト
+      { head: '#FFD700', body: '#FF6347', arms: '#4169E1', legs: '#32CD32' }, // カラフル
+      { head: '#E0E0E0', body: '#A0A0A0', arms: '#808080', legs: '#606060' }, // モノクロ
+      { head: '#FFB6C1', body: '#FF69B4', arms: '#DA70D6', legs: '#BA55D3' }  // ピンク系
+    ];
+    let currentColorScheme = 0;
+
+    // 基準ポーズ（固定）
+    const referencePose = {
+      // 頭部
+      nose: { x: 0.5, y: 0.2 },
+      leftEye: { x: 0.48, y: 0.19 },
+      rightEye: { x: 0.52, y: 0.19 },
+      leftEar: { x: 0.46, y: 0.2 },
+      rightEar: { x: 0.54, y: 0.2 },
+      
+      // 胴体
+      leftShoulder: { x: 0.43, y: 0.27 },
+      rightShoulder: { x: 0.57, y: 0.27 },
+      leftHip: { x: 0.45, y: 0.48 },
+      rightHip: { x: 0.55, y: 0.48 },
+      
+      // 腕・脚は検出結果から相対的に計算
+    };
+    
+    // 安定化ポーズ（前回の位置）
+    let stablePose = null;
+    
+    // 関節の相対的な位置関係
+    let relativeLimbs = {
+      leftElbow: { refJoint: 'leftShoulder', dx: 0, dy: 0 },
+      rightElbow: { refJoint: 'rightShoulder', dx: 0, dy: 0 },
+      leftWrist: { refJoint: 'leftElbow', dx: 0, dy: 0 },
+      rightWrist: { refJoint: 'rightElbow', dx: 0, dy: 0 },
+      leftKnee: { refJoint: 'leftHip', dx: 0, dy: 0 },
+      rightKnee: { refJoint: 'rightHip', dx: 0, dy: 0 },
+      leftAnkle: { refJoint: 'leftKnee', dx: 0, dy: 0 },
+      rightAnkle: { refJoint: 'rightKnee', dx: 0, dy: 0 }
+    };
+
+    // スライダーの値表示を更新
+    stabilitySlider.addEventListener('input', () => {
+      stabilityFactor = parseFloat(stabilitySlider.value);
+      stabilityValue.textContent = stabilityFactor.toFixed(2);
+      updateStatus(`安定度を${stabilityFactor.toFixed(2)}に設定しました`);
+    });
+
+    // ステータス表示を更新
+    function updateStatus(msg) {
+      statusEl.textContent = `ステータス: ${msg}`;
+      console.log(msg);
+    }
+
+    // キャンバスをリサイズ
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // カメラセットアップ
+    async function setupCamera() {
+      updateStatus('カメラへのアクセスを要求中...');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }
+        });
+        video.srcObject = stream;
+        return new Promise((resolve) => {
+          video.onloadeddata = () => {
+            updateStatus('カメラの接続に成功しました');
+            resolve(video);
+          };
+        });
+      } catch (error) {
+        updateStatus(`カメラへのアクセスに失敗しました: ${error.message}`);
+        throw error;
+      }
+    }
+
+    // MediaPipe PoseLandmarkerの初期化
+    async function setupPoseLandmarker() {
+      updateStatus('姿勢検出モデルを読み込み中...');
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+        );
+        poseLandmarker = await PoseLandmarker.createFromOptions(
+          vision,
+          {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numPoses: 1
+          }
+        );
+        updateStatus('姿勢検出モデルの読み込みが完了しました');
+        return poseLandmarker;
+      } catch (error) {
+        updateStatus(`姿勢検出モデルの初期化に失敗しました: ${error.message}`);
+        throw error;
+      }
+    }
+
+    // 初期化: ランドマーク配列から必要な部分を抽出して命名付きオブジェクトに変換
+    function extractNamedJoints(landmarks) {
+      const namedJoints = {};
+      
+      // インデックスと名前のマッピング
+      const jointMap = {
+        0: 'nose',
+        2: 'leftEye',
+        5: 'rightEye',
+        7: 'leftEar',
+        8: 'rightEar',
+        11: 'leftShoulder',
+        12: 'rightShoulder',
+        13: 'leftElbow',
+        14: 'rightElbow',
+        15: 'leftWrist',
+        16: 'rightWrist',
+        23: 'leftHip',
+        24: 'rightHip',
+        25: 'leftKnee',
+        26: 'rightKnee',
+        27: 'leftAnkle',
+        28: 'rightAnkle'
+      };
+      
+      // 各関節の座標を抽出
+      for (const [index, name] of Object.entries(jointMap)) {
+        const landmark = landmarks[index];
+        if (landmark && landmark.visibility > 0.5) {
+          namedJoints[name] = {
+            x: landmark.x,
+            y: landmark.y,
+            visibility: landmark.visibility
+          };
+        }
+      }
+      
+      return namedJoints;
+    }
+
+    // 位置リセット
+    function resetReferencePosition() {
+      stablePose = null;
+      updateStatus("位置をリセットしました");
+    }
+
+    // 移動可能な関節の相対位置を更新
+    function updateRelativeLimbPositions(detectedJoints) {
+      if (!detectedJoints) return;
+      
+      // 各関節の相対位置を計算
+      for (const [limbName, config] of Object.entries(relativeLimbs)) {
+        const refJointName = config.refJoint;
+        
+        // 両方の関節が検出されている場合のみ更新
+        if (detectedJoints[limbName] && detectedJoints[refJointName]) {
+          const limb = detectedJoints[limbName];
+          const refJoint = detectedJoints[refJointName];
+          
+          // 相対位置を計算
+          const dx = limb.x - refJoint.x;
+          const dy = limb.y - refJoint.y;
+          
+          // 相対位置を強いスムージングで更新
+          config.dx = config.dx * stabilityFactor + dx * (1 - stabilityFactor);
+          config.dy = config.dy * stabilityFactor + dy * (1 - stabilityFactor);
+        }
+      }
+    }
+
+    // 安定化されたポーズを生成
+    function generateStablePose(detectedJoints) {
+      // 固定関節の位置を基準とする新しいポーズ
+      const newPose = JSON.parse(JSON.stringify(referencePose));
+      
+      // 相対位置を使って移動可能な関節を更新
+      for (const [limbName, config] of Object.entries(relativeLimbs)) {
+        const refJointName = config.refJoint;
+        
+        // 参照関節が存在する場合
+        if (newPose[refJointName]) {
+          const refX = newPose[refJointName].x;
+          const refY = newPose[refJointName].y;
+          
+          // 相対位置から絶対位置を計算
+          newPose[limbName] = {
+            x: refX + config.dx,
+            y: refY + config.dy,
+            visibility: 1.0
+          };
+        }
+      }
+      
+      return newPose;
+    }
+
+    // 検出と描画のメインループ
+    function startDetectionLoop() {
+      if (animationRunning) return;
+      
+      animationRunning = true;
+      updateStatus('姿勢検出を開始します...');
+      
+      const detectionFrame = async (timestamp) => {
+        if (!animationRunning) return;
+        
+        try {
+          // キャンバスをクリア
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          
+          // ビデオフレームを処理
+          if (video.readyState >= 2) {  // HAVE_CURRENT_DATA
+            if (timestamp !== lastVideoTime) {
+              lastVideoTime = timestamp;
+              
+              // ポーズを検出
+              const results = poseLandmarker.detectForVideo(video, timestamp);
+              
+              // ランドマークがあればキャラクターを描画
+              if (results.landmarks && results.landmarks.length > 0) {
+                if (isCharacterVisible) {
+                  // 検出されたランドマークから名前付き関節を抽出
+                  const detectedJoints = extractNamedJoints(results.landmarks[0]);
+                  
+                  // 相対位置を更新
+                  updateRelativeLimbPositions(detectedJoints);
+                  
+                  // 安定化されたポーズを生成
+                  const stablePose = generateStablePose(detectedJoints);
+                  
+                  // キャラクターを描画
+                  drawCharacter(stablePose);
+                }
+                updateStatus('姿勢を検出中');
+              } else {
+                updateStatus('姿勢を検出できません - カメラに体を映してください');
+              }
+            }
+          }
+        } catch (error) {
+          console.warn('検出エラー:', error);
+        }
+        
+        // 次のフレームをリクエスト
+        requestAnimationFrame(detectionFrame);
+      };
+      
+      // 検出ループを開始
+      requestAnimationFrame(detectionFrame);
+    }
+
+    // キャラクターを描画
+    function drawCharacter(stablePose) {
+      // 各関節の位置を取得
+      const nose = stablePose.nose;
+      const leftEye = stablePose.leftEye;
+      const rightEye = stablePose.rightEye;
+      const leftShoulder = stablePose.leftShoulder;
+      const rightShoulder = stablePose.rightShoulder;
+      const leftElbow = stablePose.leftElbow;
+      const rightElbow = stablePose.rightElbow;
+      const leftWrist = stablePose.leftWrist;
+      const rightWrist = stablePose.rightWrist;
+      const leftHip = stablePose.leftHip;
+      const rightHip = stablePose.rightHip;
+      const leftKnee = stablePose.leftKnee;
+      const rightKnee = stablePose.rightKnee;
+      const leftAnkle = stablePose.leftAnkle;
+      const rightAnkle = stablePose.rightAnkle;
+      
+      // キャンバスのサイズに合わせて座標を変換
+      function transformX(x) {
+        return x * canvas.width;
+      }
+      
+      function transformY(y) {
+        return y * canvas.height;
+      }
+      
+      // 頭を描画
+      const headSize = Math.max(
+        Math.hypot(
+          transformX(leftEye.x) - transformX(rightEye.x),
+          transformY(leftEye.y) - transformY(rightEye.y)
+        ) * 5, 30
+      );
+      ctx.beginPath();
+      ctx.arc(transformX(nose.x), transformY(nose.y), headSize, 0, 2 * Math.PI);
+      ctx.fillStyle = characterColors.head;
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      
+      // 体を描画
+      ctx.beginPath();
+      ctx.moveTo(transformX(leftShoulder.x), transformY(leftShoulder.y));
+      ctx.lineTo(transformX(rightShoulder.x), transformY(rightShoulder.y));
+      ctx.lineTo(transformX(rightHip.x), transformY(rightHip.y));
+      ctx.lineTo(transformX(leftHip.x), transformY(leftHip.y));
+      ctx.closePath();
+      ctx.fillStyle = characterColors.body;
+      ctx.fill();
+      ctx.stroke();
+      
+      // 左腕を描画
+      ctx.beginPath();
+      ctx.moveTo(transformX(leftShoulder.x), transformY(leftShoulder.y));
+      
+      // 肘から手首への線（ベジエ曲線を使用）
+      ctx.quadraticCurveTo(
+        transformX(leftElbow.x), transformY(leftElbow.y),
+        transformX(leftWrist.x), transformY(leftWrist.y)
+      );
+      
+      ctx.lineWidth = 15;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = characterColors.arms;
+      ctx.stroke();
+      
+      // 右腕を描画
+      ctx.beginPath();
+      ctx.moveTo(transformX(rightShoulder.x), transformY(rightShoulder.y));
+      
+      ctx.quadraticCurveTo(
+        transformX(rightElbow.x), transformY(rightElbow.y),
+        transformX(rightWrist.x), transformY(rightWrist.y)
+      );
+      
+      ctx.lineWidth = 15;
+      ctx.strokeStyle = characterColors.arms;
+      ctx.stroke();
+      
+      // 左脚を描画
+      ctx.beginPath();
+      ctx.moveTo(transformX(leftHip.x), transformY(leftHip.y));
+      
+      ctx.quadraticCurveTo(
+        transformX(leftKnee.x), transformY(leftKnee.y),
+        transformX(leftAnkle.x), transformY(leftAnkle.y)
+      );
+      
+      ctx.lineWidth = 20;
+      ctx.strokeStyle = characterColors.legs;
+      ctx.stroke();
+      
+      // 右脚を描画
+      ctx.beginPath();
+      ctx.moveTo(transformX(rightHip.x), transformY(rightHip.y));
+      
+      ctx.quadraticCurveTo(
+        transformX(rightKnee.x), transformY(rightKnee.y),
+        transformX(rightAnkle.x), transformY(rightAnkle.y)
+      );
+      
+      ctx.lineWidth = 20;
+      ctx.strokeStyle = characterColors.legs;
+      ctx.stroke();
+      
+      // 目を描画
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      ctx.arc(transformX(leftEye.x), transformY(leftEye.y), headSize/6, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(transformX(rightEye.x), transformY(rightEye.y), headSize/6, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      // 鼻を描画
+      ctx.beginPath();
+      ctx.arc(transformX(nose.x), transformY(nose.y), headSize/8, 0, 2 * Math.PI);
+      ctx.fillStyle = '#FF0000';
+      ctx.fill();
+      
+      // 笑顔を描画
+      ctx.beginPath();
+      ctx.arc(transformX(nose.x), transformY(nose.y) + headSize/3, headSize/2, 0, Math.PI);
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    // カラースキームの切り替え
+    function changeColorScheme() {
+      currentColorScheme = (currentColorScheme + 1) % colorSchemes.length;
+      characterColors = colorSchemes[currentColorScheme];
+      updateStatus(`キャラクターの色を変更しました（スキーム ${currentColorScheme + 1}）`);
+    }
+    
+    // ビデオ表示のトグル
+    function toggleVideo() {
+      isVideoVisible = !isVideoVisible;
+      video.style.display = isVideoVisible ? 'block' : 'none';
+      updateStatus(`カメラ表示を${isVideoVisible ? 'オン' : 'オフ'}にしました`);
+    }
+    
+    // キャラクター表示のトグル
+    function toggleCharacter() {
+      isCharacterVisible = !isCharacterVisible;
+      updateStatus(`キャラクター表示を${isCharacterVisible ? 'オン' : 'オフ'}にしました`);
+    }
+    
+    // イベントリスナーの設定
+    toggleVideoBtn.addEventListener('click', toggleVideo);
+    toggleCharacterBtn.addEventListener('click', toggleCharacter);
+    toggleColorBtn.addEventListener('click', changeColorScheme);
+    resetPositionBtn.addEventListener('click', resetReferencePosition);
+    
+    // 初期化と実行
+    async function main() {
+      try {
+        // カメラのセットアップ
+        await setupCamera();
+        
+        // MediaPipe PoseLandmarkerの初期化
+        await setupPoseLandmarker();
+        
+        // 検出と描画ループを開始
+        startDetectionLoop();
+        
+        updateStatus('準備完了！カメラに体を映してください');
+      } catch (error) {
+        updateStatus(`初期化に失敗しました: ${error.message}`);
+        console.error(error);
+      }
+    }
+    
+    // アプリケーション起動
+    main();
+  </script>
+</body>
+</html>
